@@ -1,6 +1,5 @@
 demucs
 faster-whisper
-autochord
 librosa
 customtkinter
 pyinstaller

@@ -1,0 +1,152 @@
+CHORD-SCRIBE — CLAUDE CODE BRIEF
+=================================
+
+PROJECT SUMMARY
+---------------
+Build a Python desktop app called "chord-scribe" that takes a single audio
+recording of a song and outputs a ChordPro (.chopro) file with lyrics and
+chords aligned — like a standard chord/lyric sheet you'd find by googling
+a song.
+
+Build the pipeline first, GUI second, packaging third.
+
+
+PIPELINE OVERVIEW
+-----------------
+One audio file in. One .chopro file out. Four stages:
+
+  1. Source separation  — Demucs splits audio into stems
+  2. Transcription      — faster-whisper transcribes the vocal stem
+  3. Chord detection    — autochord analyzes the original audio
+  4. Align + format     — match chord timestamps to lyric lines, write ChordPro
+
+
+STAGE 1 — SOURCE SEPARATION (Demucs)
+--------------------------------------
+- Use the htdemucs model
+- Feed it the original audio file
+- Grab the vocals stem from the output folder
+- Keep the original audio file intact for chord detection (do not use the stem for chords)
+- Demucs will auto-download htdemucs on first use — that's fine, expected behavior
+
+
+STAGE 2 — TRANSCRIPTION (faster-whisper)
+------------------------------------------
+- Model: large-v2
+- Feed it the VOCALS STEM from Demucs, not the original file
+- Enable word-level timestamps (word_timestamps=True)
+- Auto-detect hardware: check torch.cuda.is_available()
+    - If True:  device="cuda", compute_type="float16"
+    - If False: device="cpu",  compute_type="int8"
+  This lets the exe use GPU when available and fall back gracefully on machines without CUDA.
+- Model will auto-download and cache on first use — that's fine
+- Output: flat list of word dicts with keys: word, start, end
+
+After transcription, group words into lyric lines:
+- A new line starts when there is a gap of ~1.0 seconds or more between words
+- Each line should have: text (joined words), start (first word start), end (last word end)
+- This threshold should be a tunable constant at the top of the file
+
+
+STAGE 3 — CHORD DETECTION (autochord)
+---------------------------------------
+- Feed it the ORIGINAL AUDIO FILE (not the vocal stem)
+- autochord.recognize() returns a list of (start, end, chord) tuples
+- Store as list of dicts: chord, start, end
+- "N" means no chord detected — treat as silence/gap, do not annotate
+
+
+STAGE 4 — ALIGNMENT + CHORDPRO FORMAT
+---------------------------------------
+Alignment logic:
+- For each lyric line, find what chord is active at that line's start time
+- A chord is "active" if line.start falls between chord.start and chord.end
+- Track whether the chord has changed from the previous line
+- Only annotate a chord when it changes (not on every line)
+
+ChordPro format:
+- Header: {title: SongTitle} and {artist: ArtistName} if provided
+- Chord appears inline at the start of the word where it changes, using [Chord] notation
+- Example: [G]Walkin down the [C]road, I saw a [D]light
+- "N" chords should be omitted entirely
+- Output as plain UTF-8 text with .chopro extension
+
+
+DEPENDENCIES
+-------------
+  demucs
+  faster-whisper
+  autochord
+  librosa
+  customtkinter
+  pyinstaller
+
+Put these in a requirements.txt.
+
+
+FIRST-RUN MODEL DOWNLOADS
+--------------------------
+All three models (htdemucs, faster-whisper large-v2, autochord) download
+automatically on first use. No special handling needed beyond:
+- Use a persistent, user-accessible cache directory (not a temp folder)
+- Print clear console messages during first-run downloads so the user
+  knows it hasn't frozen: e.g. "[1/4] Downloading models (first run only)..."
+
+
+PROJECT STRUCTURE
+------------------
+chord-scribe/
+  pipeline.py       — all pipeline logic, importable functions
+  main.py           — entry point, CLI for now (GUI later)
+  requirements.txt
+  README.txt
+
+
+CLI FIRST
+----------
+Build and test the pipeline as a CLI tool first:
+
+  python main.py <audio_file> [--title "Song Title"] [--artist "Artist Name"]
+
+Output: saves .chopro file to the same directory as the input file, also
+prints a preview to the console.
+
+Test it on a real audio file before moving to GUI.
+
+
+GUI (AFTER PIPELINE WORKS)
+----------------------------
+Use CustomTkinter. Keep it barebones but clean.
+
+Elements:
+  - File picker (audio input)
+  - Title and Artist text fields
+  - Output folder picker
+  - "Generate" button
+  - Progress bar with status label showing current stage
+    e.g. "Separating vocals...", "Transcribing...", "Detecting chords...", "Done."
+  - Text preview pane showing the ChordPro output
+  - Save button
+
+Run the pipeline in a background thread so the UI doesn't freeze.
+
+
+PACKAGING (AFTER GUI WORKS)
+-----------------------------
+Use PyInstaller, --onedir mode (more reliable than --onefile with ML deps).
+
+Important:
+  - The Demucs and Whisper model weights download at runtime, not bundled
+  - Make sure the cache directory is persistent across runs and not inside
+    any temp or PyInstaller-extracted folder
+  - Test the packaged exe on a clean machine if possible
+
+
+NOTES
+------
+- Chord detection accuracy is ~70-85%. The output is a starting point for
+  human review, not a finished document. Design with that in mind.
+- Demucs vocal separation is the biggest accuracy win for sung lyrics.
+  Do not skip it or make it optional in the first version.
+- The line-grouping gap threshold (default 1.0s) may need tuning per song.
+  Make it easy to adjust.
