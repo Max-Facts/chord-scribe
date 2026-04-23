@@ -6,9 +6,21 @@ Usage:
 """
 
 import argparse
+import logging
 import pathlib
 import sys
 from pipeline import process
+
+
+def setup_logging(log_path: str):
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
 
 
 def main():
@@ -30,21 +42,29 @@ def main():
         print(f"Error: file not found: {audio_path}")
         sys.exit(1)
 
-    if args.output:
-        output_path = args.output
-    else:
-        output_path = str(audio_path.with_suffix(".chopro"))
+    output_path = args.output or str(audio_path.with_suffix(".chopro"))
+    log_path = str(audio_path.with_suffix(".log"))
+    setup_logging(log_path)
 
-    chopro = process(
-        audio_path=str(audio_path),
-        output_path=output_path,
-        title=args.title,
-        artist=args.artist,
-    )
+    log = logging.getLogger(__name__)
+    log.info("chord-scribe started: %s", audio_path)
 
-    print("\n--- ChordPro Preview ---")
-    print(chopro)
-    print("------------------------")
+    try:
+        chopro = process(
+            audio_path=str(audio_path),
+            output_path=output_path,
+            title=args.title,
+            artist=args.artist,
+        )
+        print("\n--- ChordPro Preview ---")
+        print(chopro)
+        print("------------------------")
+        log.info("Done.")
+    except Exception as e:
+        log.exception("Pipeline failed: %s", e)
+        print(f"\nError: {e}")
+        print(f"See {log_path} for details.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

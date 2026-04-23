@@ -12,9 +12,11 @@ Features to implement when building the GUI (and pipeline support where needed).
 
 ## Existing lyrics (.txt file)
 - Optional file picker in UI for a pre-written lyrics file
-- When provided, skip the Whisper transcription stage entirely
-- Parse the .txt into lyric lines and align chords to them as normal
-- Useful for: faster runs, tricky vocals, songs where Whisper struggles
+- Whisper still runs for word-level timestamps — the .txt replaces the
+  transcribed *text* but timing still comes from Whisper's alignment
+- Approach: run Whisper with forced alignment against the provided lyrics,
+  or align provided lines to Whisper word timestamps by sequence matching
+- Useful for: correcting Whisper mishears, songs with tricky vocals
 - Pipeline: `process()` should accept an optional `lyrics_path` parameter
 
 ## Artist / song autofill from audio metadata

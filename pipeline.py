@@ -3,13 +3,15 @@ chord-scribe pipeline
 Stages: source separation → transcription → chord detection → align + format
 """
 
-import os
+import logging
 import pathlib
 import numpy as np
 import librosa
 import soundfile as sf
 import torch
 from faster_whisper import WhisperModel
+
+log = logging.getLogger(__name__)
 
 # Tunable constants
 LINE_GAP_THRESHOLD = 0.5  # seconds of silence that starts a new lyric line
@@ -20,10 +22,12 @@ LINE_MAX_WORDS = 8        # max words per line before forcing a break (fallback 
 # Stage 1 — Source separation (Demucs)
 # ---------------------------------------------------------------------------
 
-def separate_vocals(audio_path: str, output_dir: str) -> str:
+def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
     """
-    Run Demucs htdemucs via Python API on audio_path, return path to the vocals stem.
-    Uses soundfile for I/O to avoid torchaudio / torchcodec dependency issues.
+    Run Demucs htdemucs on audio_path.
+    Returns (vocals_path, other_path) — both saved as WAV files.
+    The 'other' stem (guitar, piano, synths) is used for chord detection.
+    Uses soundfile for I/O to avoid torchaudio / torchcodec issues.
     """
     from demucs.pretrained import get_model
     from demucs.apply import apply_model
@@ -33,15 +37,15 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     vocals_path = output_dir / f"{audio_path.stem}_vocals.wav"
+    other_path  = output_dir / f"{audio_path.stem}_other.wav"
 
-    print("[1/4] Separating vocals (Demucs htdemucs)...")
+    log.info("Stage 1: separating stems with Demucs htdemucs")
+    print("[1/4] Separating stems (Demucs htdemucs)...")
 
-    # Load audio with soundfile — no torchaudio/torchcodec needed
     wav_np, sr = sf.read(str(audio_path), always_2d=True)  # (samples, channels)
     wav_np = wav_np.T.astype(np.float32)                   # (channels, samples)
     wav = torch.from_numpy(wav_np)
 
-    # Demucs htdemucs expects stereo (2 channels)
     if wav.shape[0] == 1:
         wav = wav.repeat(2, 1)
     elif wav.shape[0] > 2:
@@ -50,25 +54,24 @@ def separate_vocals(audio_path: str, output_dir: str) -> str:
     model = get_model("htdemucs")
     model.eval()
 
-    # Normalize
     ref = wav.mean(0)
     wav_norm = (wav - ref.mean()) / (ref.std() + 1e-8)
 
     with torch.no_grad():
         sources = apply_model(model, wav_norm[None], progress=True)[0]
 
-    vocals_idx = model.sources.index("vocals")
-    vocals_tensor = sources[vocals_idx]  # (channels, samples)
+    def _save_stem(name: str, path: pathlib.Path):
+        idx = model.sources.index(name)
+        tensor = sources[idx] * (ref.std() + 1e-8) + ref.mean()
+        sf.write(str(path), tensor.cpu().numpy().T, sr)
+        log.info("Saved stem '%s' -> %s", name, path)
 
-    # Denormalize
-    vocals_tensor = vocals_tensor * (ref.std() + 1e-8) + ref.mean()
+    _save_stem("vocals", vocals_path)
+    _save_stem("other",  other_path)
 
-    # Save with soundfile
-    vocals_np = vocals_tensor.cpu().numpy().T  # (samples, channels)
-    sf.write(str(vocals_path), vocals_np, sr)
-
-    print(f"    Vocals stem: {vocals_path}")
-    return str(vocals_path)
+    print(f"    Vocals: {vocals_path}")
+    print(f"    Other (guitar/piano): {other_path}")
+    return str(vocals_path), str(other_path)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +83,7 @@ def transcribe(vocals_path: str) -> list[dict]:
     Transcribe the vocals stem with faster-whisper large-v2.
     Returns a list of word dicts: {word, start, end}
     """
+    log.info("Stage 2: transcribing %s", vocals_path)
     print("[2/4] Transcribing vocals (faster-whisper large-v2)...")
 
     if torch.cuda.is_available():
@@ -89,6 +93,7 @@ def transcribe(vocals_path: str) -> list[dict]:
         device = "cpu"
         compute_type = "int8"
 
+    log.info("Whisper device=%s compute_type=%s", device, compute_type)
     print(f"    Device: {device} / compute_type: {compute_type}")
 
     model = WhisperModel("large-v2", device=device, compute_type=compute_type)
@@ -100,27 +105,36 @@ def transcribe(vocals_path: str) -> list[dict]:
             for w in segment.words:
                 words.append({"word": w.word, "start": w.start, "end": w.end})
 
+    log.info("Transcribed %d words", len(words))
     print(f"    Transcribed {len(words)} words.")
     return words
 
 
 def group_into_lines(words: list[dict]) -> list[dict]:
     """
-    Group words into lyric lines using two conditions:
-    - Gap of >= LINE_GAP_THRESHOLD seconds between words, OR
-    - Current line has reached LINE_MAX_WORDS words (fallback for sung lyrics
-      where Whisper produces few pauses)
-    Returns list of line dicts: {text, start, end}
+    Group words into lyric lines.
+    Break conditions (in priority order):
+    1. Gap >= LINE_GAP_THRESHOLD between words (natural pause)
+    2. Previous word ends with punctuation AND line >= LINE_MIN_WORDS (phrase end)
+    3. Line has reached LINE_MAX_WORDS (hard fallback for sung lyrics)
+    Returns list of line dicts: {text, start, end, words}
     """
     if not words:
         return []
+
+    LINE_MIN_WORDS = 4  # don't break on punctuation until at least this many words
 
     lines = []
     current = [words[0]]
 
     for word in words[1:]:
         gap = word["start"] - current[-1]["end"]
-        if gap >= LINE_GAP_THRESHOLD or len(current) >= LINE_MAX_WORDS:
+        prev_text = current[-1]["word"].strip()
+        ends_phrase = prev_text and prev_text[-1] in ".,!?;"
+
+        if (gap >= LINE_GAP_THRESHOLD
+                or (ends_phrase and len(current) >= LINE_MIN_WORDS)
+                or len(current) >= LINE_MAX_WORDS):
             lines.append(_make_line(current))
             current = [word]
         else:
@@ -192,9 +206,12 @@ def _best_chord(chroma_frame: np.ndarray) -> str:
 
 def detect_chords(audio_path: str) -> list[dict]:
     """
-    Detect chords from the original audio file using librosa chroma features.
+    Detect chords from the given audio file using librosa chroma features.
+    For best results, pass the 'other' stem (guitar/piano) rather than the
+    original mix — bass and drums interfere with chroma analysis.
     Returns list of dicts: {chord, start, end}
     """
+    log.info("Stage 3: detecting chords from %s", audio_path)
     print("[3/4] Detecting chords (librosa chroma template matching)...")
 
     y, sr = librosa.load(audio_path, mono=True)
@@ -236,6 +253,7 @@ def detect_chords(audio_path: str) -> list[dict]:
             merged.append(dict(seg))
 
     real = [c for c in merged if c["chord"] != "N"]
+    log.info("Detected %d chord segments (%d total inc. silence)", len(real), len(merged))
     print(f"    Detected {len(real)} chord segments (excluding silences).")
     return merged
 
@@ -261,7 +279,8 @@ def build_chordpro(
 ) -> str:
     """
     Align chords to lyric lines and produce ChordPro text.
-    Chords are only annotated when they change.
+    Chords are annotated inline at the word where they change,
+    not just at line starts.
     """
     print("[4/4] Aligning chords and formatting ChordPro...")
 
@@ -277,16 +296,22 @@ def build_chordpro(
     prev_chord = None
 
     for line in lines:
-        chord = _chord_at(chords, line["start"])
+        words = line.get("words", [])
+        if not words:
+            out.append(line["text"])
+            continue
 
-        if chord and chord != prev_chord:
-            # Insert chord marker at the start of the first word
-            annotated = f"[{chord}]{line['text']}"
-            prev_chord = chord
-        else:
-            annotated = line["text"]
+        parts = []
+        for word in words:
+            text = word["word"].strip()
+            chord = _chord_at(chords, word["start"])
+            if chord and chord != prev_chord:
+                parts.append(f"[{chord}]{text}")
+                prev_chord = chord
+            else:
+                parts.append(text)
 
-        out.append(annotated)
+        out.append(" ".join(parts))
 
     return "\n".join(out)
 
@@ -312,14 +337,15 @@ def process(
         work_dir = str(pathlib.Path(audio_path).parent / "chord_scribe_work")
     pathlib.Path(work_dir).mkdir(parents=True, exist_ok=True)
 
-    vocals_path = separate_vocals(audio_path, work_dir)
+    vocals_path, other_path = separate_stems(audio_path, work_dir)
     words = transcribe(vocals_path)
     lines = group_into_lines(words)
-    chords = detect_chords(audio_path)
+    chords = detect_chords(other_path)   # use guitar/piano stem, not full mix
     chopro = build_chordpro(lines, chords, title=title, artist=artist)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(chopro)
 
+    log.info("Saved ChordPro to %s", output_path)
     print(f"\nSaved: {output_path}")
     return chopro
