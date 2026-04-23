@@ -286,13 +286,36 @@ def detect_chords(audio_path: str) -> list[dict]:
 # Stage 4 — Alignment + ChordPro formatting
 # ---------------------------------------------------------------------------
 
-def _chord_at(chords: list[dict], time: float) -> str | None:
-    """Return the chord active at `time`, or None if none / 'N'."""
+# How far ahead (in seconds) to look for an incoming chord change.
+# Catches cases where a word starts just before a beat, but the chord
+# changes on that beat — pulls the annotation forward by one word.
+CHORD_LOOKAHEAD = 0.25
+
+
+def _chord_at(chords: list[dict], time: float, next_word_time: float | None = None) -> str | None:
+    """
+    Return the chord active at `time`, with a lookahead for upcoming changes.
+    If a chord change occurs within CHORD_LOOKAHEAD seconds (and before the
+    next word starts), the incoming chord is returned instead of the current one.
+    This corrects the systematic 1-word-late bias caused by words starting
+    just before a beat where the chord changes.
+    """
+    current = None
     for c in chords:
         if c["start"] <= time < c["end"]:
-            chord = c["chord"]
-            return None if chord == "N" else chord
-    return None
+            current = None if c["chord"] == "N" else c["chord"]
+            break
+
+    # Peek ahead: find the earliest chord change within the lookahead window
+    look_until = time + CHORD_LOOKAHEAD
+    if next_word_time is not None:
+        look_until = min(look_until, next_word_time)
+
+    for c in chords:
+        if time < c["start"] <= look_until and c["chord"] not in ("N", current):
+            return c["chord"]
+
+    return current
 
 
 def build_chordpro(
@@ -326,9 +349,10 @@ def build_chordpro(
             continue
 
         parts = []
-        for word in words:
+        for i, word in enumerate(words):
             text = word["word"].strip()
-            chord = _chord_at(chords, word["start"])
+            next_time = words[i + 1]["start"] if i + 1 < len(words) else None
+            chord = _chord_at(chords, word["start"], next_word_time=next_time)
             if chord and chord != prev_chord:
                 parts.append(f"[{chord}]{text}")
                 prev_chord = chord
