@@ -122,7 +122,7 @@ def group_into_lines(words: list[dict]) -> list[dict]:
     if not words:
         return []
 
-    LINE_MIN_WORDS = 4  # don't break on punctuation until at least this many words
+    LINE_MIN_WORDS = 4  # don't break on soft signals until at least this many words
 
     lines = []
     current = [words[0]]
@@ -130,11 +130,17 @@ def group_into_lines(words: list[dict]) -> list[dict]:
     for word in words[1:]:
         gap = word["start"] - current[-1]["end"]
         prev_text = current[-1]["word"].strip()
-        ends_phrase = prev_text and prev_text[-1] in ".,!?;"
+        next_text = word["word"].strip()
 
-        if (gap >= LINE_GAP_THRESHOLD
-                or (ends_phrase and len(current) >= LINE_MIN_WORDS)
-                or len(current) >= LINE_MAX_WORDS):
+        # Hard punctuation ending (no comma — commas are mid-phrase)
+        ends_phrase = prev_text and prev_text[-1] in ".!?;"
+        # Whisper capitalizes the first word of a new phrase even without punctuation.
+        # Skip single-char words (e.g. "I" is always capitalized in English).
+        next_capitalized = bool(len(next_text) > 1 and next_text[0].isupper())
+
+        soft_break = (ends_phrase or next_capitalized) and len(current) >= LINE_MIN_WORDS
+
+        if gap >= LINE_GAP_THRESHOLD or soft_break or len(current) >= LINE_MAX_WORDS:
             lines.append(_make_line(current))
             current = [word]
         else:
