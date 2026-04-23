@@ -40,6 +40,18 @@ Features to implement when building the GUI (and pipeline support where needed).
 - Use `os.startfile()` on Windows, `subprocess.run(['open', ...])` on Mac
 - Only enabled after a successful generation + save
 
+## Real-time progress bar (Demucs tqdm relay)
+- Currently the progress bar jumps at stage boundaries; Demucs takes the longest
+- Intercept Demucs tqdm output and relay percentage to the GUI progress bar in real time
+- Makes the separation stage feel active rather than frozen
+
+## Packaging (PyInstaller)
+- Bundle into a standalone .exe using PyInstaller --onedir mode
+- Model weights (Demucs, Whisper) download at runtime — not bundled
+- Ensure cache directory is persistent across runs and not inside any temp/extracted folder
+- Requires CUDA torch — document GPU vs CPU build difference for packaged installs
+- Test on a clean machine if possible
+
 ## Artist / song autofill from audio metadata
 - On audio file selection, read ID3/FLAC/etc. tags using `mutagen`
 - Pre-populate Title and Artist fields from embedded metadata
