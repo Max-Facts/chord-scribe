@@ -19,6 +19,7 @@ env/
 
 # Model cache / output
 *.chopro
+*.pdf
 *.wav
 *.mp3
 *.flac

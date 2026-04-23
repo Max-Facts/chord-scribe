@@ -8,6 +8,12 @@ Format: [version] — date — description
 
 ## [Unreleased]
 
+### GUI
+- Added gui.py: CustomTkinter interface with file picker, title/artist fields,
+  output folder picker, progress bar, ChordPro preview pane, and Save button
+- Pipeline runs in a background thread — UI stays responsive during processing
+- Progress bar updates at each stage with status label
+
 - Project initialized
 - Pipeline complete: Demucs → faster-whisper → librosa chord detection → ChordPro output
 - Replaced autochord (vamp dependency, broken on Windows) with pure librosa chroma template matching
