@@ -27,6 +27,19 @@ Features to implement when building the GUI (and pipeline support where needed).
 - Output .chopro files saved alongside each source file (or to a shared output folder)
 - CLI support: `python main.py folder/ --output-dir ./output/`
 
+## Cancel button
+- Stops the pipeline mid-run and re-enables the Generate button
+- Demucs and Whisper don't support clean interruption natively; use a
+  threading.Event flag checked between stages — can't cancel mid-stage
+  but will stop before the next one starts
+- Clean up any partial work files on cancel
+
+## Open in ChordPro
+- Button that opens the saved .chopro file directly in the system's
+  registered ChordPro application (or default .chopro handler)
+- Use `os.startfile()` on Windows, `subprocess.run(['open', ...])` on Mac
+- Only enabled after a successful generation + save
+
 ## Artist / song autofill from audio metadata
 - On audio file selection, read ID3/FLAC/etc. tags using `mutagen`
 - Pre-populate Title and Artist fields from embedded metadata
