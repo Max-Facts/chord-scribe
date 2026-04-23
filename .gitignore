@@ -19,8 +19,20 @@ env/
 
 # Model cache / output
 *.chopro
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
 separated/
+chord_scribe_work/
 *.log
+
+# Claude Code
+.claude/
+
+# Project-specific
+chord-scribe-instructions.txt
 
 # OS
 .DS_Store
