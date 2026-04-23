@@ -3,3 +3,7 @@ faster-whisper
 librosa
 customtkinter
 pyinstaller
+torchcodec
+
+# PyTorch: install the CUDA build for GPU acceleration (CPU fallback works too)
+# pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
