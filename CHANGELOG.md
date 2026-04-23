@@ -20,4 +20,6 @@ Format: [version] — date — description
 - Replaced torchaudio I/O (requires torchcodec/shared FFmpeg) with soundfile
 - Added LINE_MAX_WORDS fallback for line grouping (sung lyrics have few natural pauses)
 - Tuned defaults: gap=0.5s, max_words=8, chord_hop=0.25s, min_dur=0.5s, energy=0.005
+- Beat-synchronous chord detection: chords analyzed per beat via librosa beat tracker,
+  boundaries now align with actual musical events rather than fixed time windows
 - Added tune.py for fast parameter iteration with cached transcription/chord data

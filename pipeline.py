@@ -191,11 +191,9 @@ def _build_templates() -> dict[str, np.ndarray]:
 
 _TEMPLATES = _build_templates()
 
-# How many seconds per chord analysis frame
-CHORD_HOP_SECONDS = 0.25
-# Minimum chord duration to emit (merges tiny fragments)
-CHORD_MIN_DURATION = 0.5
-# Energy threshold below which we emit "N" (silence/no chord)
+# Minimum number of consecutive beats a chord must hold to be kept
+CHORD_MIN_BEATS = 1
+# Energy threshold below which a beat is treated as silence
 CHORD_ENERGY_THRESHOLD = 0.005
 
 
@@ -214,56 +212,74 @@ def _best_chord(chroma_frame: np.ndarray) -> str:
 
 def detect_chords(audio_path: str) -> list[dict]:
     """
-    Detect chords from the given audio file using librosa chroma features.
-    For best results, pass the 'other' stem (guitar/piano) rather than the
-    original mix — bass and drums interfere with chroma analysis.
+    Detect chords using beat-synchronous chroma analysis.
+    Chords are analyzed per beat rather than per fixed time window,
+    so detected boundaries align with actual musical events.
+    For best results, pass the 'other' stem (guitar/piano).
     Returns list of dicts: {chord, start, end}
     """
-    log.info("Stage 3: detecting chords from %s", audio_path)
-    print("[3/4] Detecting chords (librosa chroma template matching)...")
+    log.info("Stage 3: detecting chords (beat-synchronous) from %s", audio_path)
+    print("[3/4] Detecting chords (beat-synchronous chroma)...")
 
     y, sr = librosa.load(audio_path, mono=True)
-    hop_length = int(sr * CHORD_HOP_SECONDS)
+    total_dur = librosa.get_duration(y=y, sr=sr)
 
-    # CQT-based chromagram is more accurate for chord detection than STFT
+    # Use a fine hop for chroma/RMS resolution, beats snap to this grid
+    hop_length = 512
+
+    # Track beats
+    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
+    log.info("Detected tempo ~%.1f BPM, %d beats", float(np.atleast_1d(tempo)[0]), len(beat_times))
+    print(f"    Tempo ~{float(np.atleast_1d(tempo)[0]):.0f} BPM, {len(beat_times)} beats")
+
+    # CQT chroma and RMS at the fine hop resolution
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    rms    = librosa.feature.rms(y=y, hop_length=hop_length)[0]
 
-    n_frames = chroma.shape[1]
-    frame_chords = []
-    for i in range(n_frames):
-        t = librosa.frames_to_time(i, sr=sr, hop_length=hop_length)
-        energy = float(rms[min(i, len(rms) - 1)])
-        if energy < CHORD_ENERGY_THRESHOLD:
+    # Aggregate chroma and energy over each beat interval
+    beat_chords = []
+    boundaries = list(beat_times) + [total_dur]
+
+    for i, beat_t in enumerate(beat_times):
+        start_frame = librosa.time_to_frames(beat_t,            sr=sr, hop_length=hop_length)
+        end_frame   = librosa.time_to_frames(boundaries[i + 1], sr=sr, hop_length=hop_length)
+        end_frame   = min(end_frame, chroma.shape[1])
+
+        if end_frame <= start_frame:
+            beat_chords.append((beat_t, "N"))
+            continue
+
+        beat_chroma  = chroma[:, start_frame:end_frame].mean(axis=1)
+        beat_energy  = float(rms[start_frame:end_frame].mean())
+
+        if beat_energy < CHORD_ENERGY_THRESHOLD:
             label = "N"
         else:
-            label = _best_chord(chroma[:, i])
-        frame_chords.append((t, label))
+            label = _best_chord(beat_chroma)
+
+        beat_chords.append((beat_t, label))
 
     # Merge consecutive identical chords into segments
     segments = []
-    if frame_chords:
-        seg_start, seg_label = frame_chords[0]
-        for t, label in frame_chords[1:]:
-            if label != seg_label:
-                segments.append({"chord": seg_label, "start": seg_start, "end": t})
-                seg_start, seg_label = t, label
-        total_dur = librosa.get_duration(y=y, sr=sr)
+    if beat_chords:
+        seg_start, seg_label = beat_chords[0]
+        seg_beats = 1
+        for t, label in beat_chords[1:]:
+            if label == seg_label:
+                seg_beats += 1
+            else:
+                if seg_beats >= CHORD_MIN_BEATS:
+                    segments.append({"chord": seg_label, "start": seg_start, "end": t})
+                elif segments:
+                    segments[-1]["end"] = t  # absorb tiny blip into previous
+                seg_start, seg_label, seg_beats = t, label, 1
         segments.append({"chord": seg_label, "start": seg_start, "end": total_dur})
 
-    # Merge very short segments into the previous one
-    merged = []
-    for seg in segments:
-        dur = seg["end"] - seg["start"]
-        if merged and dur < CHORD_MIN_DURATION:
-            merged[-1]["end"] = seg["end"]
-        else:
-            merged.append(dict(seg))
-
-    real = [c for c in merged if c["chord"] != "N"]
-    log.info("Detected %d chord segments (%d total inc. silence)", len(real), len(merged))
+    real = [c for c in segments if c["chord"] != "N"]
+    log.info("Detected %d chord segments (%d total inc. silence)", len(real), len(segments))
     print(f"    Detected {len(real)} chord segments (excluding silences).")
-    return merged
+    return segments
 
 
 # ---------------------------------------------------------------------------
