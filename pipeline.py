@@ -39,12 +39,13 @@ def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
     vocals_path = output_dir / f"{audio_path.stem}_vocals.wav"
     other_path  = output_dir / f"{audio_path.stem}_other.wav"
 
-    log.info("Stage 1: separating stems with Demucs htdemucs")
-    print("[1/4] Separating stems (Demucs htdemucs)...")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    log.info("Stage 1: separating stems with Demucs htdemucs (device=%s)", device)
+    print(f"[1/4] Separating stems (Demucs htdemucs, device={device})...")
 
     wav_np, sr = sf.read(str(audio_path), always_2d=True)  # (samples, channels)
     wav_np = wav_np.T.astype(np.float32)                   # (channels, samples)
-    wav = torch.from_numpy(wav_np)
+    wav = torch.from_numpy(wav_np).to(device)
 
     if wav.shape[0] == 1:
         wav = wav.repeat(2, 1)
@@ -52,6 +53,7 @@ def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
         wav = wav[:2]
 
     model = get_model("htdemucs")
+    model.to(device)
     model.eval()
 
     ref = wav.mean(0)
