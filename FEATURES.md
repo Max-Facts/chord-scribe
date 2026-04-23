@@ -19,6 +19,14 @@ Features to implement when building the GUI (and pipeline support where needed).
 - Useful for: correcting Whisper mishears, songs with tricky vocals
 - Pipeline: `process()` should accept an optional `lyrics_path` parameter
 
+## Batch processing
+- Allow selecting multiple audio files (or a folder) at once
+- Queue displayed in the UI showing each file and its status (waiting, processing, done, error)
+- Processes one file at a time sequentially (ML models are memory-heavy)
+- Title/Artist fields become optional per-file overrides; autofill from metadata where available
+- Output .chopro files saved alongside each source file (or to a shared output folder)
+- CLI support: `python main.py folder/ --output-dir ./output/`
+
 ## Artist / song autofill from audio metadata
 - On audio file selection, read ID3/FLAC/etc. tags using `mutagen`
 - Pre-populate Title and Artist fields from embedded metadata
