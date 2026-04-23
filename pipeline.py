@@ -12,7 +12,8 @@ import torch
 from faster_whisper import WhisperModel
 
 # Tunable constants
-LINE_GAP_THRESHOLD = 1.0  # seconds of silence that starts a new lyric line
+LINE_GAP_THRESHOLD = 0.5  # seconds of silence that starts a new lyric line
+LINE_MAX_WORDS = 8        # max words per line before forcing a break (fallback for sung lyrics)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +106,10 @@ def transcribe(vocals_path: str) -> list[dict]:
 
 def group_into_lines(words: list[dict]) -> list[dict]:
     """
-    Group words into lyric lines based on LINE_GAP_THRESHOLD.
+    Group words into lyric lines using two conditions:
+    - Gap of >= LINE_GAP_THRESHOLD seconds between words, OR
+    - Current line has reached LINE_MAX_WORDS words (fallback for sung lyrics
+      where Whisper produces few pauses)
     Returns list of line dicts: {text, start, end}
     """
     if not words:
@@ -116,7 +120,7 @@ def group_into_lines(words: list[dict]) -> list[dict]:
 
     for word in words[1:]:
         gap = word["start"] - current[-1]["end"]
-        if gap >= LINE_GAP_THRESHOLD:
+        if gap >= LINE_GAP_THRESHOLD or len(current) >= LINE_MAX_WORDS:
             lines.append(_make_line(current))
             current = [word]
         else:
@@ -166,11 +170,11 @@ def _build_templates() -> dict[str, np.ndarray]:
 _TEMPLATES = _build_templates()
 
 # How many seconds per chord analysis frame
-CHORD_HOP_SECONDS = 0.5
+CHORD_HOP_SECONDS = 0.25
 # Minimum chord duration to emit (merges tiny fragments)
-CHORD_MIN_DURATION = 1.0
+CHORD_MIN_DURATION = 0.5
 # Energy threshold below which we emit "N" (silence/no chord)
-CHORD_ENERGY_THRESHOLD = 0.01
+CHORD_ENERGY_THRESHOLD = 0.005
 
 
 def _best_chord(chroma_frame: np.ndarray) -> str:
