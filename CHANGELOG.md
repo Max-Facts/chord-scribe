@@ -8,6 +8,45 @@ Format: [version] — date — description
 
 ## [Unreleased]
 
+### Session 5 — 2026-05-07
+
+#### Pipeline — line break tuning
+- `group_into_lines()` now takes optional `chords` parameter. When chord
+  segments are passed in, a chord change at a word boundary becomes a
+  soft phrase-break signal (gated by `LINE_MIN_WORDS_BEFORE_CHORD_BREAK`,
+  default 8). Lyric phrases and chord progressions tend to align in pop
+  songs, so this catches phrase ends Whisper's punctuation/capitalization
+  signals miss.
+- New `LINE_MIN_WORDS_FOR_SOFT_BREAK` constant (default 3) gates ALL soft
+  break signals (gap, chord-change, punctuation/capitalization). A break
+  only fires if the closing line would have at least this many words.
+  Prevents 1–2 word orphan fragments ("pool", "cruel", "news") that sung
+  vocals' breath-pause gaps were producing. The hard `LINE_MAX_WORDS`
+  cap still wins regardless.
+- `process()` now runs chord detection BEFORE line grouping, so chord
+  segments are available for the chord-aware break logic.
+- `tune.py` ITERATIONS now exercises chord_min and the gate together.
+
+#### Validated on Golden Fool
+- 44 generated lines vs 47 in manual reference. Section-boundary tag
+  lines (`Yeah, golden fool` etc.) now correctly stand alone instead of
+  jamming into the next verse.
+- All chord roots (F, Dm, A#, Gm) match manual on every appearance.
+- C and Am7 in manual aren't on the recording (Max's bass parts) — not
+  a detection miss.
+
+#### Sidecar Python downgrade
+- Provisioned `venv-chords/` against Python 3.8 (originally aimed at
+  3.10, but only 3.7/3.8 were installed locally). madmom 0.16.1 builds
+  cleanly on 3.8 with the same pinned numpy/scipy/cython/mido.
+
+#### Bug fixes
+- gui.py: bind exception message to a local variable before passing to
+  `self.after()` lambda; previously `e` was cleared at except-block exit
+  and the lambda raised NameError when an actual pipeline error fired.
+- chord_detect.py: added `from __future__ import annotations` for
+  Python 3.8 compatibility with `list[dict]` style return annotations.
+
 ### Session 4 — 2026-05-06
 
 #### Pipeline
@@ -67,31 +106,4 @@ Format: [version] — date — description
   beat tracker; boundaries now align with actual musical events
 - Chord lookahead (0.25s): corrects systematic 1-word-late bias caused by words
   starting just before the beat where the chord changes
-- Word-level chord annotation: chords appear inline at the exact word where they
-  change, not just at line starts
-- Replaced autochord (vamp/Windows broken) with pure librosa chroma template matching
-- Replaced torchaudio I/O (requires torchcodec) with soundfile for all audio I/O
-- Use Demucs 'other' stem (guitar/piano) for chord detection — removes bass/drum
-  interference from chroma analysis
-- Added CUDA detection to Demucs stage (Whisper already had it); GPU gives ~10x
-  speedup on RTX 3060 (full run ~30s vs ~5min on CPU)
-- Installed PyTorch CUDA build (cu126) to activate RTX 3060
-- LINE_MAX_WORDS=8 fallback for line grouping (sung lyrics have few natural pauses)
-- Punctuation-aware line breaks; capitalization used as soft phrase-boundary signal
-- Tuning script (tune.py) for fast parameter sweeps with cached ML data
-
-#### Logging
-- pipeline.py: logging throughout all 4 stages
-- main.py: errors caught and written to a .log file alongside .chopro output
-
-#### GUI
-- gui.py: CustomTkinter interface with file picker, title/artist fields,
-  output folder picker, progress bar, ChordPro preview pane, and Save button
-- Pipeline runs in background thread — UI stays responsive during processing
-
-### Session 1 — 2026-04-23
-
-- Project initialized
-- Pipeline scaffolded: Demucs → faster-whisper → chord detection → ChordPro
-- requirements.txt, README.txt, CHANGELOG.md, .gitignore
-- GitHub repo created and connected (Max-Facts/chord-scribe)
+- Word-level

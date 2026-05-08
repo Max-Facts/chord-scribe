@@ -22,18 +22,20 @@ CACHE_DIR = pathlib.Path("chord_scribe_work")
 # Chord detection is now done by madmom (sidecar venv); chord-side params live
 # in chord_detect.py -- only line-grouping tunables remain here.
 ITERATIONS = [
-    # 1 -- current production defaults (Session 3)
-    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14},
-    # 2 -- generous gap
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 14},
-    # 3 -- tighter gap, longer max
-    {"LINE_GAP_THRESHOLD": 0.3, "LINE_MAX_WORDS": 16},
-    # 4 -- shorter lines
-    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 10},
-    # 5 -- punchy lines
-    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 8},
-    # 6 -- long lines, no max
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 999},
+    # 1 -- old defaults (chord-aware off)
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 999},
+    # 2 -- chord-aware on, default min
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 4},
+    # 3 -- chord-aware on, looser min (later breaks)
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 6},
+    # 4 -- chord-aware on, tighter min (earlier breaks)
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 3},
+    # 5 -- chord-aware + lower max-words safety net
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 10, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 4},
+    # 6 -- chord-aware + tighter gap
+    {"LINE_GAP_THRESHOLD": 0.3, "LINE_MAX_WORDS": 14, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 4},
+    # 7 -- chord-aware aggressive (low min, low max)
+    {"LINE_GAP_THRESHOLD": 0.3, "LINE_MAX_WORDS": 10, "LINE_MIN_WORDS_BEFORE_CHORD_BREAK": 3},
 ]
 
 
@@ -74,15 +76,17 @@ def apply_params(params: dict):
 
 def run_iteration(n: int, params: dict, words: list[dict], chords: list[dict]):
     apply_params(params)
-    lines = pipeline.group_into_lines(words)
+    lines = pipeline.group_into_lines(words, chords)
     chopro = pipeline.build_chordpro(lines, chords, title="Golden Fool", artist="Unknown")
 
     chord_count = chopro.count("[")
     line_count = len([l for l in chopro.splitlines() if l and not l.startswith("{")])
 
+    chord_min = params.get("LINE_MIN_WORDS_BEFORE_CHORD_BREAK", "—")
     print(f"\n{'='*70}")
     print(f"Iteration {n:2d} | gap={params['LINE_GAP_THRESHOLD']}s  "
-          f"max_words={params['LINE_MAX_WORDS']}")
+          f"max_words={params['LINE_MAX_WORDS']}  "
+          f"chord_min={chord_min}")
     print(f"           | {line_count} lines, {chord_count} chord annotations")
     print(f"{'-'*70}")
     # Show first 8 lines as a preview

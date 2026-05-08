@@ -1,6 +1,6 @@
 """
 chord-scribe pipeline
-Stages: source separation → transcription → chord detection → align + format
+Stages: source separation -> transcription -> chord detection -> align + format
 """
 
 import json
@@ -17,20 +17,27 @@ from faster_whisper import WhisperModel
 log = logging.getLogger(__name__)
 
 # Tunable constants
-LINE_GAP_THRESHOLD = 0.5  # seconds of silence that starts a new lyric line
-LINE_MAX_WORDS = 14       # max words per line before forcing a break (fallback for sung lyrics)
+LINE_GAP_THRESHOLD = 0.5            # seconds of silence that starts a new lyric line
+LINE_MAX_WORDS = 14                 # hard cap on words per line (fallback for sung lyrics)
+# Chord changes are strong phrase-boundary signals in pop/rock songs. A chord
+# change at a word's start triggers a soft break, but only after the line has
+# at least this many words -- prevents every chord change from chopping lines.
+LINE_MIN_WORDS_BEFORE_CHORD_BREAK = 8
+# Sung lyrics have lots of mid-phrase breath gaps. Even when a gap or chord
+# change would normally fire a break, suppress it if the resulting (closing)
+# line would have fewer than this many words -- prevents 1-2 word orphans
+# like "pool" or "cruel". The hard cap (LINE_MAX_WORDS) still always wins.
+LINE_MIN_WORDS_FOR_SOFT_BREAK = 3
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — Source separation (Demucs)
+# Stage 1 -- Source separation (Demucs)
 # ---------------------------------------------------------------------------
 
 def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
     """
     Run Demucs htdemucs on audio_path.
-    Returns (vocals_path, other_path) — both saved as WAV files.
-    The 'other' stem (guitar, piano, synths) is used for chord detection.
-    Uses soundfile for I/O to avoid torchaudio / torchcodec issues.
+    Returns (vocals_path, other_path) -- both saved as WAV files.
     """
     from demucs.pretrained import get_model
     from demucs.apply import apply_model
@@ -46,8 +53,8 @@ def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
     log.info("Stage 1: separating stems with Demucs htdemucs (device=%s)", device)
     print(f"[1/4] Separating stems (Demucs htdemucs, device={device})...")
 
-    wav_np, sr = sf.read(str(audio_path), always_2d=True)  # (samples, channels)
-    wav_np = wav_np.T.astype(np.float32)                   # (channels, samples)
+    wav_np, sr = sf.read(str(audio_path), always_2d=True)
+    wav_np = wav_np.T.astype(np.float32)
     wav = torch.from_numpy(wav_np).to(device)
 
     if wav.shape[0] == 1:
@@ -80,7 +87,7 @@ def separate_stems(audio_path: str, output_dir: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 — Transcription (faster-whisper)
+# Stage 2 -- Transcription (faster-whisper)
 # ---------------------------------------------------------------------------
 
 def transcribe(vocals_path: str) -> list[dict]:
@@ -115,37 +122,52 @@ def transcribe(vocals_path: str) -> list[dict]:
     return words
 
 
-def group_into_lines(words: list[dict]) -> list[dict]:
+def group_into_lines(words: list[dict], chords: list[dict] | None = None) -> list[dict]:
     """
     Group words into lyric lines.
-    Break conditions (in priority order):
+    Break conditions:
     1. Gap >= LINE_GAP_THRESHOLD between words (natural pause)
-    2. Previous word ends with punctuation AND line >= LINE_MIN_WORDS (phrase end)
-    3. Line has reached LINE_MAX_WORDS (hard fallback for sung lyrics)
-    Returns list of line dicts: {text, start, end, words}
+    2. Chord change AND line >= LINE_MIN_WORDS_BEFORE_CHORD_BREAK
+    3. Punctuation OR capitalization AND line >= LINE_MIN_WORDS
+    Soft signals (1-3) are gated by LINE_MIN_WORDS_FOR_SOFT_BREAK -- the
+    closing line must have at least that many words, otherwise we'd
+    produce 1-2 word orphans on breath pauses mid-phrase.
+    4. Hard cap: line has reached LINE_MAX_WORDS (always wins).
     """
     if not words:
         return []
 
-    LINE_MIN_WORDS = 4  # don't break on soft signals until at least this many words
+    LINE_MIN_WORDS = 4
 
     lines = []
     current = [words[0]]
+    prev_chord = _chord_label_at(chords, words[0]["start"]) if chords else None
 
     for word in words[1:]:
         gap = word["start"] - current[-1]["end"]
         prev_text = current[-1]["word"].strip()
         next_text = word["word"].strip()
 
-        # Hard punctuation ending (no comma — commas are mid-phrase)
         ends_phrase = prev_text and prev_text[-1] in ".!?;"
-        # Whisper capitalizes the first word of a new phrase even without punctuation.
-        # Skip single-char words (e.g. "I" is always capitalized in English).
         next_capitalized = bool(len(next_text) > 1 and next_text[0].isupper())
-
         soft_break = (ends_phrase or next_capitalized) and len(current) >= LINE_MIN_WORDS
 
-        if gap >= LINE_GAP_THRESHOLD or soft_break or len(current) >= LINE_MAX_WORDS:
+        chord_break = False
+        if chords:
+            this_chord = _chord_label_at(chords, word["start"])
+            if (this_chord is not None
+                    and this_chord != prev_chord
+                    and this_chord != "N"
+                    and prev_chord != "N"
+                    and len(current) >= LINE_MIN_WORDS_BEFORE_CHORD_BREAK):
+                chord_break = True
+            prev_chord = this_chord
+
+        # Min-line-length gate: soft signals only fire if closing line is long enough.
+        long_enough = len(current) >= LINE_MIN_WORDS_FOR_SOFT_BREAK
+        soft_signal = (gap >= LINE_GAP_THRESHOLD) or chord_break or soft_break
+
+        if (long_enough and soft_signal) or len(current) >= LINE_MAX_WORDS:
             lines.append(_make_line(current))
             current = [word]
         else:
@@ -155,6 +177,15 @@ def group_into_lines(words: list[dict]) -> list[dict]:
         lines.append(_make_line(current))
 
     return lines
+
+
+def _chord_label_at(chords: list[dict] | None, time: float) -> str | None:
+    if not chords:
+        return None
+    for c in chords:
+        if c["start"] <= time < c["end"]:
+            return c["chord"]
+    return None
 
 
 def _make_line(words: list[dict]) -> dict:
@@ -167,18 +198,8 @@ def _make_line(words: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — Chord detection (madmom CNN+CRF, via Python 3.8 sidecar venv)
+# Stage 3 -- Chord detection (madmom CNN+CRF, sidecar venv)
 # ---------------------------------------------------------------------------
-#
-# madmom doesn't build on Python 3.14, so chord detection runs in a separate
-# 3.10 venv (venv-chords/) created by setup-chords-venv.bat. The main pipeline
-# shells out to chord_detect.py with the audio path and reads JSON segments
-# back from stdout. The CRF in madmom handles segmentation and smoothing
-# internally — no onset detection, template matching, min-duration filter,
-# or lookahead heuristic needed.
-
-# Chord vocabulary: madmom's pretrained CRF emits major/minor only.
-# 7th detection (if added later) should be a post-pass over these segments.
 
 _PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
 _CHORDS_VENV_PYTHON = _PROJECT_ROOT / "venv-chords" / "Scripts" / "python.exe"
@@ -186,16 +207,7 @@ _CHORD_DETECT_SCRIPT = _PROJECT_ROOT / "chord_detect.py"
 
 
 def detect_chords(audio_path: str) -> list[dict]:
-    """
-    Detect chords by invoking chord_detect.py inside the Python 3.10 sidecar
-    venv (venv-chords/), which has madmom installed.
-
-    The sidecar runs madmom's CNNChordFeatureProcessor + CRFChordRecognitionProcessor
-    on the stem and emits JSON segments {chord, start, end} on stdout.
-
-    Returns list of dicts: {chord, start, end}. "N" = no chord (silence/break).
-    """
-    log.info("Stage 3: detecting chords with madmom (sidecar venv) from %s", audio_path)
+    log.info("Stage 3: detecting chords with madmom (sidecar) from %s", audio_path)
     print("[3/4] Detecting chords (madmom CNN+CRF)...")
 
     if not _CHORDS_VENV_PYTHON.exists():
@@ -204,18 +216,13 @@ def detect_chords(audio_path: str) -> list[dict]:
             f"Run setup-chords-venv.bat once to create it."
         )
     if not _CHORD_DETECT_SCRIPT.exists():
-        raise FileNotFoundError(
-            f"Sidecar script not found at {_CHORD_DETECT_SCRIPT}."
-        )
+        raise FileNotFoundError(f"Sidecar script not found at {_CHORD_DETECT_SCRIPT}.")
 
     proc = subprocess.run(
         [str(_CHORDS_VENV_PYTHON), str(_CHORD_DETECT_SCRIPT), str(audio_path)],
-        capture_output=True,
-        text=True,
-        check=False,
+        capture_output=True, text=True, check=False,
     )
 
-    # Sidecar uses stderr for progress messages — relay them to our log
     if proc.stderr:
         for line in proc.stderr.splitlines():
             if line.strip():
@@ -223,17 +230,13 @@ def detect_chords(audio_path: str) -> list[dict]:
                 print(f"    {line}")
 
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"chord_detect.py exited {proc.returncode}.\n"
-            f"stderr:\n{proc.stderr}"
-        )
+        raise RuntimeError(f"chord_detect.py exited {proc.returncode}.\nstderr:\n{proc.stderr}")
 
     try:
         segments = json.loads(proc.stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError(
-            f"Could not parse chord_detect.py output as JSON: {e}\n"
-            f"stdout:\n{proc.stdout[:500]}"
+            f"Could not parse chord_detect.py output: {e}\nstdout:\n{proc.stdout[:500]}"
         )
 
     real = [c for c in segments if c["chord"] != "N"]
@@ -243,45 +246,29 @@ def detect_chords(audio_path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 4 — Alignment + ChordPro formatting
+# Stage 4 -- Alignment + ChordPro formatting
 # ---------------------------------------------------------------------------
 
-# Small lookahead to catch words that start just before a guitar strum.
-# Onset timing is accurate but vocals often land a fraction of a second
-# before the downstroke — 0.1s pulls the annotation forward without overcorrecting.
 CHORD_LOOKAHEAD = 0.1
 
 
 def _chord_at(chords: list[dict], time: float) -> str | None:
-    """Return the chord active at `time`, with a short lookahead for upcoming changes."""
     current = None
     for c in chords:
         if c["start"] <= time < c["end"]:
             current = None if c["chord"] == "N" else c["chord"]
             break
-
     for c in chords:
         if time < c["start"] <= time + CHORD_LOOKAHEAD and c["chord"] not in ("N", current):
             return c["chord"]
-
     return current
 
 
-def build_chordpro(
-    lines: list[dict],
-    chords: list[dict],
-    title: str = "",
-    artist: str = "",
-) -> str:
-    """
-    Align chords to lyric lines and produce ChordPro text.
-    Chords are annotated inline at the word where they change,
-    not just at line starts.
-    """
+def build_chordpro(lines: list[dict], chords: list[dict],
+                   title: str = "", artist: str = "") -> str:
     print("[4/4] Aligning chords and formatting ChordPro...")
 
     out = []
-
     if title:
         out.append(f"{{title: {title}}}")
     if artist:
@@ -298,7 +285,7 @@ def build_chordpro(
             continue
 
         parts = []
-        for i, word in enumerate(words):
+        for word in words:
             text = word["word"].strip()
             chord = _chord_at(chords, word["start"])
             if chord and chord != prev_chord:
@@ -308,7 +295,6 @@ def build_chordpro(
             else:
                 parts.append(text)
 
-        # Append any chord changes that fall in the gap after this line's last word
         gap_start = line["end"]
         gap_end = lines[line_idx + 1]["start"] if line_idx + 1 < len(lines) else gap_start
         for c in chords:
@@ -325,17 +311,10 @@ def build_chordpro(
 # Top-level runner
 # ---------------------------------------------------------------------------
 
-def process(
-    audio_path: str,
-    output_path: str,
-    title: str = "",
-    artist: str = "",
-    work_dir: str | None = None,
-) -> str:
-    """
-    Run the full pipeline. Returns the ChordPro text.
-    Writes output to output_path.
-    """
+def process(audio_path: str, output_path: str,
+            title: str = "", artist: str = "",
+            work_dir: str | None = None) -> str:
+    """Run the full pipeline. Writes ChordPro text to output_path, returns it."""
     audio_path = str(pathlib.Path(audio_path).resolve())
 
     if work_dir is None:
@@ -344,8 +323,8 @@ def process(
 
     vocals_path, other_path = separate_stems(audio_path, work_dir)
     words = transcribe(vocals_path)
-    lines = group_into_lines(words)
-    chords = detect_chords(other_path)   # use guitar/piano stem, not full mix
+    chords = detect_chords(other_path)
+    lines = group_into_lines(words, chords)
     chopro = build_chordpro(lines, chords, title=title, artist=artist)
 
     with open(output_path, "w", encoding="utf-8") as f:
