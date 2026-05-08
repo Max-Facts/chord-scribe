@@ -3,8 +3,11 @@ chord-scribe pipeline
 Stages: source separation → transcription → chord detection → align + format
 """
 
+import json
 import logging
 import pathlib
+import subprocess
+import sys
 import numpy as np
 import librosa
 import soundfile as sf
@@ -15,7 +18,7 @@ log = logging.getLogger(__name__)
 
 # Tunable constants
 LINE_GAP_THRESHOLD = 0.5  # seconds of silence that starts a new lyric line
-LINE_MAX_WORDS = 8        # max words per line before forcing a break (fallback for sung lyrics)
+LINE_MAX_WORDS = 14       # max words per line before forcing a break (fallback for sung lyrics)
 
 
 # ---------------------------------------------------------------------------
@@ -164,117 +167,74 @@ def _make_line(words: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Stage 3 — Chord detection (librosa chroma + template matching)
+# Stage 3 — Chord detection (madmom CNN+CRF, via Python 3.8 sidecar venv)
 # ---------------------------------------------------------------------------
+#
+# madmom doesn't build on Python 3.14, so chord detection runs in a separate
+# 3.10 venv (venv-chords/) created by setup-chords-venv.bat. The main pipeline
+# shells out to chord_detect.py with the audio path and reads JSON segments
+# back from stdout. The CRF in madmom handles segmentation and smoothing
+# internally — no onset detection, template matching, min-duration filter,
+# or lookahead heuristic needed.
 
-# Chord templates: 12 chroma bins starting from C
-_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+# Chord vocabulary: madmom's pretrained CRF emits major/minor only.
+# 7th detection (if added later) should be a post-pass over these segments.
 
-def _build_templates() -> dict[str, np.ndarray]:
-    """Return major and minor chord templates (unit vectors over 12 chroma bins)."""
-    major_intervals = [0, 4, 7]   # root, major 3rd, perfect 5th
-    minor_intervals = [0, 3, 7]   # root, minor 3rd, perfect 5th
-
-    templates = {}
-    for i, note in enumerate(_NOTES):
-        maj = np.zeros(12)
-        for interval in major_intervals:
-            maj[(i + interval) % 12] = 1.0
-        templates[note] = maj / np.linalg.norm(maj)
-
-        min_ = np.zeros(12)
-        for interval in minor_intervals:
-            min_[(i + interval) % 12] = 1.0
-        templates[f"{note}m"] = min_ / np.linalg.norm(min_)
-
-    return templates
-
-_TEMPLATES = _build_templates()
-
-# Minimum number of consecutive beats a chord must hold to be kept
-CHORD_MIN_BEATS = 1
-# Energy threshold below which a beat is treated as silence
-CHORD_ENERGY_THRESHOLD = 0.005
-
-
-def _best_chord(chroma_frame: np.ndarray) -> str:
-    """Return the chord label with the highest cosine similarity to chroma_frame."""
-    chroma_frame = chroma_frame / (np.linalg.norm(chroma_frame) + 1e-8)
-    best_label = "N"
-    best_score = -1.0
-    for label, template in _TEMPLATES.items():
-        score = float(np.dot(chroma_frame, template))
-        if score > best_score:
-            best_score = score
-            best_label = label
-    return best_label
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent
+_CHORDS_VENV_PYTHON = _PROJECT_ROOT / "venv-chords" / "Scripts" / "python.exe"
+_CHORD_DETECT_SCRIPT = _PROJECT_ROOT / "chord_detect.py"
 
 
 def detect_chords(audio_path: str) -> list[dict]:
     """
-    Detect chords using beat-synchronous chroma analysis.
-    Chords are analyzed per beat rather than per fixed time window,
-    so detected boundaries align with actual musical events.
-    For best results, pass the 'other' stem (guitar/piano).
-    Returns list of dicts: {chord, start, end}
+    Detect chords by invoking chord_detect.py inside the Python 3.10 sidecar
+    venv (venv-chords/), which has madmom installed.
+
+    The sidecar runs madmom's CNNChordFeatureProcessor + CRFChordRecognitionProcessor
+    on the stem and emits JSON segments {chord, start, end} on stdout.
+
+    Returns list of dicts: {chord, start, end}. "N" = no chord (silence/break).
     """
-    log.info("Stage 3: detecting chords (beat-synchronous) from %s", audio_path)
-    print("[3/4] Detecting chords (beat-synchronous chroma)...")
+    log.info("Stage 3: detecting chords with madmom (sidecar venv) from %s", audio_path)
+    print("[3/4] Detecting chords (madmom CNN+CRF)...")
 
-    y, sr = librosa.load(audio_path, mono=True)
-    total_dur = librosa.get_duration(y=y, sr=sr)
+    if not _CHORDS_VENV_PYTHON.exists():
+        raise FileNotFoundError(
+            f"Sidecar venv not found at {_CHORDS_VENV_PYTHON}. "
+            f"Run setup-chords-venv.bat once to create it."
+        )
+    if not _CHORD_DETECT_SCRIPT.exists():
+        raise FileNotFoundError(
+            f"Sidecar script not found at {_CHORD_DETECT_SCRIPT}."
+        )
 
-    # Use a fine hop for chroma/RMS resolution, beats snap to this grid
-    hop_length = 512
+    proc = subprocess.run(
+        [str(_CHORDS_VENV_PYTHON), str(_CHORD_DETECT_SCRIPT), str(audio_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    # Track beats
-    tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, hop_length=hop_length)
-    beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
-    log.info("Detected tempo ~%.1f BPM, %d beats", float(np.atleast_1d(tempo)[0]), len(beat_times))
-    print(f"    Tempo ~{float(np.atleast_1d(tempo)[0]):.0f} BPM, {len(beat_times)} beats")
+    # Sidecar uses stderr for progress messages — relay them to our log
+    if proc.stderr:
+        for line in proc.stderr.splitlines():
+            if line.strip():
+                log.info("[chord_detect] %s", line)
+                print(f"    {line}")
 
-    # CQT chroma and RMS at the fine hop resolution
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    rms    = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"chord_detect.py exited {proc.returncode}.\n"
+            f"stderr:\n{proc.stderr}"
+        )
 
-    # Aggregate chroma and energy over each beat interval
-    beat_chords = []
-    boundaries = list(beat_times) + [total_dur]
-
-    for i, beat_t in enumerate(beat_times):
-        start_frame = librosa.time_to_frames(beat_t,            sr=sr, hop_length=hop_length)
-        end_frame   = librosa.time_to_frames(boundaries[i + 1], sr=sr, hop_length=hop_length)
-        end_frame   = min(end_frame, chroma.shape[1])
-
-        if end_frame <= start_frame:
-            beat_chords.append((beat_t, "N"))
-            continue
-
-        beat_chroma  = chroma[:, start_frame:end_frame].mean(axis=1)
-        beat_energy  = float(rms[start_frame:end_frame].mean())
-
-        if beat_energy < CHORD_ENERGY_THRESHOLD:
-            label = "N"
-        else:
-            label = _best_chord(beat_chroma)
-
-        beat_chords.append((beat_t, label))
-
-    # Merge consecutive identical chords into segments
-    segments = []
-    if beat_chords:
-        seg_start, seg_label = beat_chords[0]
-        seg_beats = 1
-        for t, label in beat_chords[1:]:
-            if label == seg_label:
-                seg_beats += 1
-            else:
-                if seg_beats >= CHORD_MIN_BEATS:
-                    segments.append({"chord": seg_label, "start": seg_start, "end": t})
-                elif segments:
-                    segments[-1]["end"] = t  # absorb tiny blip into previous
-                seg_start, seg_label, seg_beats = t, label, 1
-        segments.append({"chord": seg_label, "start": seg_start, "end": total_dur})
+    try:
+        segments = json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"Could not parse chord_detect.py output as JSON: {e}\n"
+            f"stdout:\n{proc.stdout[:500]}"
+        )
 
     real = [c for c in segments if c["chord"] != "N"]
     log.info("Detected %d chord segments (%d total inc. silence)", len(real), len(segments))
@@ -286,33 +246,22 @@ def detect_chords(audio_path: str) -> list[dict]:
 # Stage 4 — Alignment + ChordPro formatting
 # ---------------------------------------------------------------------------
 
-# How far ahead (in seconds) to look for an incoming chord change.
-# Catches cases where a word starts just before a beat, but the chord
-# changes on that beat — pulls the annotation forward by one word.
-CHORD_LOOKAHEAD = 0.25
+# Small lookahead to catch words that start just before a guitar strum.
+# Onset timing is accurate but vocals often land a fraction of a second
+# before the downstroke — 0.1s pulls the annotation forward without overcorrecting.
+CHORD_LOOKAHEAD = 0.1
 
 
-def _chord_at(chords: list[dict], time: float, next_word_time: float | None = None) -> str | None:
-    """
-    Return the chord active at `time`, with a lookahead for upcoming changes.
-    If a chord change occurs within CHORD_LOOKAHEAD seconds (and before the
-    next word starts), the incoming chord is returned instead of the current one.
-    This corrects the systematic 1-word-late bias caused by words starting
-    just before a beat where the chord changes.
-    """
+def _chord_at(chords: list[dict], time: float) -> str | None:
+    """Return the chord active at `time`, with a short lookahead for upcoming changes."""
     current = None
     for c in chords:
         if c["start"] <= time < c["end"]:
             current = None if c["chord"] == "N" else c["chord"]
             break
 
-    # Peek ahead: find the earliest chord change within the lookahead window
-    look_until = time + CHORD_LOOKAHEAD
-    if next_word_time is not None:
-        look_until = min(look_until, next_word_time)
-
     for c in chords:
-        if time < c["start"] <= look_until and c["chord"] not in ("N", current):
+        if time < c["start"] <= time + CHORD_LOOKAHEAD and c["chord"] not in ("N", current):
             return c["chord"]
 
     return current
@@ -342,7 +291,7 @@ def build_chordpro(
 
     prev_chord = None
 
-    for line in lines:
+    for line_idx, line in enumerate(lines):
         words = line.get("words", [])
         if not words:
             out.append(line["text"])
@@ -351,13 +300,21 @@ def build_chordpro(
         parts = []
         for i, word in enumerate(words):
             text = word["word"].strip()
-            next_time = words[i + 1]["start"] if i + 1 < len(words) else None
-            chord = _chord_at(chords, word["start"], next_word_time=next_time)
+            chord = _chord_at(chords, word["start"])
             if chord and chord != prev_chord:
-                parts.append(f"[{chord}]{text}")
+                prefix = f"[{chord}] " if not parts else f"[{chord}]"
+                parts.append(f"{prefix}{text}")
                 prev_chord = chord
             else:
                 parts.append(text)
+
+        # Append any chord changes that fall in the gap after this line's last word
+        gap_start = line["end"]
+        gap_end = lines[line_idx + 1]["start"] if line_idx + 1 < len(lines) else gap_start
+        for c in chords:
+            if gap_start <= c["start"] < gap_end and c["chord"] not in ("N", prev_chord):
+                parts.append(f"[{c['chord']}]")
+                prev_chord = c["chord"]
 
         out.append(" ".join(parts))
 

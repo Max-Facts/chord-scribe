@@ -1,0 +1,9 @@
+# Sidecar venv for madmom chord detection (venv-chords/, Python 3.8).
+# Pinned versions because madmom is no longer maintained on PyPI and
+# breaks against newer numpy / scipy releases.
+
+numpy<1.24            # madmom uses np.float / np.int aliases removed in 1.24
+scipy<1.13            # newer scipy drops APIs madmom imports
+cython>=0.29,<3.0     # build dependency for madmom
+mido>=1.2,<1.3        # newer mido changed APIs madmom relies on
+madmom==0.16.1

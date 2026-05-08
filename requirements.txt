@@ -7,3 +7,7 @@ torchcodec
 
 # PyTorch: install the CUDA build for GPU acceleration (CPU fallback works too)
 # pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+# Chord detection (madmom) lives in a separate Python 3.10 sidecar venv
+# because madmom doesn't build on 3.14. See requirements-chords.txt and
+# setup-chords-venv.bat for the sidecar setup.

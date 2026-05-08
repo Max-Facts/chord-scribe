@@ -195,7 +195,8 @@ class App(ctk.CTk):
             self.after(0, self._on_success)
         except Exception as e:
             log.exception("Pipeline error: %s", e)
-            self.after(0, lambda: self._on_error(str(e)))
+            err_msg = str(e)  # bind before lambda; e is cleared on except exit
+            self.after(0, lambda: self._on_error(err_msg))
         finally:
             pipeline.separate_stems  = original_separate
             pipeline.transcribe      = original_transcribe
@@ -253,10 +254,16 @@ class App(ctk.CTk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    log_path = pathlib.Path(__file__).parent / "chord-scribe.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_path, encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
     )
+    logging.getLogger(__name__).info("GUI started, logging to %s", log_path)
     app = App()
     app.mainloop()
 

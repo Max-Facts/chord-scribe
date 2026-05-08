@@ -17,29 +17,23 @@ import pipeline
 
 CACHE_DIR = pathlib.Path("chord_scribe_work")
 
-# ── Parameter sets to try ────────────────────────────────────────────────────
+# -- Parameter sets to try -----------------------------------------------------
 # Each dict overrides the defaults for that iteration.
+# Chord detection is now done by madmom (sidecar venv); chord-side params live
+# in chord_detect.py -- only line-grouping tunables remain here.
 ITERATIONS = [
-    # 1 — baseline: no max-words limit (old behaviour)
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 999, "CHORD_HOP_SECONDS": 0.5, "CHORD_MIN_DURATION": 1.0,  "CHORD_ENERGY_THRESHOLD": 0.01},
-    # 2 — max 10 words, generous gap
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 10,  "CHORD_HOP_SECONDS": 0.5, "CHORD_MIN_DURATION": 1.0,  "CHORD_ENERGY_THRESHOLD": 0.01},
-    # 3 — max 8 words
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 8,   "CHORD_HOP_SECONDS": 0.5, "CHORD_MIN_DURATION": 1.0,  "CHORD_ENERGY_THRESHOLD": 0.01},
-    # 4 — max 6 words (short punchy lines)
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 6,   "CHORD_HOP_SECONDS": 0.5, "CHORD_MIN_DURATION": 1.0,  "CHORD_ENERGY_THRESHOLD": 0.01},
-    # 5 — max 8 words + finer chord hop + lower energy
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 8,   "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 0.5, "CHORD_ENERGY_THRESHOLD": 0.005},
-    # 6 — max 8 words + very low energy threshold
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 8,   "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 0.5, "CHORD_ENERGY_THRESHOLD": 0.001},
-    # 7 — max 8 words + tighter gap threshold too
-    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 8,   "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 0.5, "CHORD_ENERGY_THRESHOLD": 0.005},
-    # 8 — max 10 words + tighter gap + finer chord
-    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 10,  "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 0.5, "CHORD_ENERGY_THRESHOLD": 0.005},
-    # 9 — balanced sweet spot candidate
-    {"LINE_GAP_THRESHOLD": 0.8, "LINE_MAX_WORDS": 8,   "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 0.5, "CHORD_ENERGY_THRESHOLD": 0.003},
-    # 10 — max 12 words (longer lines, fewer chord changes)
-    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 12,  "CHORD_HOP_SECONDS": 0.25, "CHORD_MIN_DURATION": 1.0, "CHORD_ENERGY_THRESHOLD": 0.005},
+    # 1 -- current production defaults (Session 3)
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 14},
+    # 2 -- generous gap
+    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 14},
+    # 3 -- tighter gap, longer max
+    {"LINE_GAP_THRESHOLD": 0.3, "LINE_MAX_WORDS": 16},
+    # 4 -- shorter lines
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 10},
+    # 5 -- punchy lines
+    {"LINE_GAP_THRESHOLD": 0.5, "LINE_MAX_WORDS": 8},
+    # 6 -- long lines, no max
+    {"LINE_GAP_THRESHOLD": 1.0, "LINE_MAX_WORDS": 999},
 ]
 
 
@@ -88,10 +82,7 @@ def run_iteration(n: int, params: dict, words: list[dict], chords: list[dict]):
 
     print(f"\n{'='*70}")
     print(f"Iteration {n:2d} | gap={params['LINE_GAP_THRESHOLD']}s  "
-          f"max_words={params['LINE_MAX_WORDS']}  "
-          f"hop={params['CHORD_HOP_SECONDS']}s  "
-          f"min_dur={params['CHORD_MIN_DURATION']}s  "
-          f"energy={params['CHORD_ENERGY_THRESHOLD']}")
+          f"max_words={params['LINE_MAX_WORDS']}")
     print(f"           | {line_count} lines, {chord_count} chord annotations")
     print(f"{'-'*70}")
     # Show first 8 lines as a preview
